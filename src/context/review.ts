@@ -210,7 +210,6 @@ const diffContextPerHunk = async (
     });
   });
 
-  // hunks.forEach((hunk, idx) => {
   for (const [idx, hunk] of hunks.entries()) {
     try {
       const trimmedHunk = trimHunk(hunk);
@@ -257,7 +256,6 @@ const diffContextPerHunk = async (
       order.push(idx);
     }
   }
-  // );
 
   const scopeStategy: [string, diff.Hunk][] = []; // holds map range key and combined hunk: [[key, hunk]]
   for (const [range, hunks] of scopeRangeHunkMap.entries()) {
