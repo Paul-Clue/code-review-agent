@@ -59,7 +59,8 @@ const filterFile = (file: PRFile) => {
     "env",
     "toml",
     "svg",
-    ".ipynb"
+    ".ipynb",
+    ".wasm",
   ]);
   const filesToIgnore = new Set<string>([
     "package-lock.json",
@@ -72,7 +73,8 @@ const filterFile = (file: PRFile) => {
     "packages.txt",
     "utils.py",
     "requirements.txt",
-    "tumor-classify.ipynb"
+    "tumor-classify.ipynb",
+    "tree-sitter-python.wasm",
   ]);
   const filename = file.filename.toLowerCase().split("/").pop();
   if (filename && filesToIgnore.has(filename)) {
