@@ -59,8 +59,8 @@ const filterFile = (file: PRFile) => {
     "env",
     "toml",
     "svg",
-    ".ipynb",
-    ".wasm",
+    "ipynb",
+    "wasm",
   ]);
   const filesToIgnore = new Set<string>([
     "package-lock.json",
