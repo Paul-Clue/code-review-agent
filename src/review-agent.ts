@@ -36,10 +36,10 @@ export const reviewDiff = async (messages: ChatCompletionMessageParam[]) => {
 
 export const reviewFiles = async (
   files: PRFile[],
-  patchBuilder: (file: PRFile) => string,
+  patchBuilder: (file: PRFile) => Promise<string>,
   convoBuilder: (diff: string) => ChatCompletionMessageParam[]
 ) => {
-  const patches = files.map((file) => patchBuilder(file));
+  const patches = await Promise.all(files.map((file) => patchBuilder(file)));
   const messages = convoBuilder(patches.join("\n"));
   const feedback = await reviewDiff(messages);
   return feedback;
@@ -59,6 +59,7 @@ const filterFile = (file: PRFile) => {
     "env",
     "toml",
     "svg",
+    ".ipynb"
   ]);
   const filesToIgnore = new Set<string>([
     "package-lock.json",
@@ -68,6 +69,10 @@ const filterFile = (file: PRFile) => {
     "tsconfig.json",
     "poetry.lock",
     "readme.md",
+    "packages.txt",
+    "utils.py",
+    "requirements.txt",
+    "tumor-classify.ipynb"
   ]);
   const filename = file.filename.toLowerCase().split("/").pop();
   if (filename && filesToIgnore.has(filename)) {
@@ -104,43 +109,41 @@ const groupFilesByExtension = (files: PRFile[]): Map<string, PRFile[]> => {
 };
 
 // all of the files here can be processed with the prompt at minimum
-const processWithinLimitFiles = (
+const processWithinLimitFiles = async (
   files: PRFile[],
-  patchBuilder: (file: PRFile) => string,
+  patchBuilder: (file: PRFile) => Promise<string>,
   convoBuilder: (diff: string) => ChatCompletionMessageParam[]
 ) => {
   const processGroups: PRFile[][] = [];
-  const convoWithinModelLimit = isConversationWithinLimit(
-    constructPrompt(files, patchBuilder, convoBuilder)
-  );
+  const messages = await constructPrompt(files, patchBuilder, convoBuilder);
+  const convoWithinModelLimit = isConversationWithinLimit(messages);
 
-  console.log(`Within model token limits: ${convoWithinModelLimit}`);
   if (!convoWithinModelLimit) {
     const grouped = groupFilesByExtension(files);
     for (const [extension, filesForExt] of grouped.entries()) {
-      const extGroupWithinModelLimit = isConversationWithinLimit(
-        constructPrompt(filesForExt, patchBuilder, convoBuilder)
-      );
+      const messages = await constructPrompt(filesForExt, patchBuilder, convoBuilder);
+      const extGroupWithinModelLimit = isConversationWithinLimit(messages);
+      
       if (extGroupWithinModelLimit) {
         processGroups.push(filesForExt);
       } else {
-        // extension group exceeds model limit
-        console.log(
-          "Processing files per extension that exceed model limit ..."
-        );
         let currentGroup: PRFile[] = [];
         filesForExt.sort((a, b) => a.patchTokenLength - b.patchTokenLength);
-        filesForExt.forEach((file) => {
-          const isPotentialGroupWithinLimit = isConversationWithinLimit(
-            constructPrompt([...currentGroup, file], patchBuilder, convoBuilder)
-          );
+        
+        for (const file of filesForExt) {
+          const messages = await constructPrompt([...currentGroup, file], patchBuilder, convoBuilder);
+          const isPotentialGroupWithinLimit = isConversationWithinLimit(messages);
+          
           if (isPotentialGroupWithinLimit) {
             currentGroup.push(file);
           } else {
-            processGroups.push(currentGroup);
+            if (currentGroup.length > 0) {
+              processGroups.push([...currentGroup]);
+            }
             currentGroup = [file];
           }
-        });
+        }
+        
         if (currentGroup.length > 0) {
           processGroups.push(currentGroup);
         }
@@ -162,45 +165,46 @@ const stripRemovedLines = (originalFile: PRFile) => {
   return { ...originalFile, patch: strippedPatch };
 };
 
-const processOutsideLimitFiles = (
+const processOutsideLimitFiles = async (
   files: PRFile[],
-  patchBuilder: (file: PRFile) => string,
+  patchBuilder: (file: PRFile) => Promise<string>,
   convoBuilder: (diff: string) => ChatCompletionMessageParam[]
 ) => {
   const processGroups: PRFile[][] = [];
-  if (files.length == 0) {
+  if (files.length === 0) {
     return processGroups;
   }
+
   files = files.map((file) => stripRemovedLines(file));
-  const convoWithinModelLimit = isConversationWithinLimit(
-    constructPrompt(files, patchBuilder, convoBuilder)
-  );
+  const messages = await constructPrompt(files, patchBuilder, convoBuilder);
+  const convoWithinModelLimit = isConversationWithinLimit(messages);
+
   if (convoWithinModelLimit) {
     processGroups.push(files);
   } else {
     const exceedingLimits: PRFile[] = [];
     const withinLimits: PRFile[] = [];
-    files.forEach((file) => {
-      const isFileConvoWithinLimits = isConversationWithinLimit(
-        constructPrompt([file], patchBuilder, convoBuilder)
-      );
+
+    for (const file of files) {
+      const messages = await constructPrompt([file], patchBuilder, convoBuilder);
+      const isFileConvoWithinLimits = isConversationWithinLimit(messages);
+      
       if (isFileConvoWithinLimits) {
         withinLimits.push(file);
       } else {
         exceedingLimits.push(file);
       }
-    });
-    const withinLimitsGroup = processWithinLimitFiles(
+    }
+
+    const withinLimitsGroups = await processWithinLimitFiles(
       withinLimits,
       patchBuilder,
       convoBuilder
     );
-    withinLimitsGroup.forEach((group) => {
-      processGroups.push(group);
-    });
+    processGroups.push(...withinLimitsGroups);
+
     if (exceedingLimits.length > 0) {
       console.log("TODO: Need to further chunk large file changes.");
-      // throw "Unimplemented"
     }
   }
   return processGroups;
@@ -339,50 +343,55 @@ export const reviewChanges = async (
   convoBuilder: (diff: string) => ChatCompletionMessageParam[],
   responseBuilder: (responses: string[]) => Promise<BuilderResponse>
 ) => {
-  const patchBuilder = buildPatchPrompt;
+  const patchBuilder = async (file: PRFile) => await buildPatchPrompt(file);
   const filteredFiles = files.filter((file) => filterFile(file));
-  filteredFiles.map((file) => {
-    file.patchTokenLength = getTokenLength(patchBuilder(file));
-  });
-  // further subdivide if necessary, maybe group files by common extension?
+  
+  await Promise.all(
+    filteredFiles.map(async (file) => {
+      file.patchTokenLength = getTokenLength(await patchBuilder(file));
+    })
+  );
+
   const patchesWithinModelLimit: PRFile[] = [];
-  // these single file patches are larger than the full model context
   const patchesOutsideModelLimit: PRFile[] = [];
 
-  filteredFiles.forEach((file) => {
-    const patchWithPromptWithinLimit = isConversationWithinLimit(
-      constructPrompt([file], patchBuilder, convoBuilder)
-    );
+  for (const file of filteredFiles) {
+    const patch = await patchBuilder(file);
+    const messages = await constructPrompt([file], patchBuilder, convoBuilder);
+    const patchWithPromptWithinLimit = isConversationWithinLimit(messages);
+    
     if (patchWithPromptWithinLimit) {
       patchesWithinModelLimit.push(file);
     } else {
       patchesOutsideModelLimit.push(file);
     }
-  });
+  }
 
-  console.log(`files within limits: ${patchesWithinModelLimit.length}`);
-  const withinLimitsPatchGroups = processWithinLimitFiles(
+  const withinLimitsPatchGroups = await processWithinLimitFiles(
     patchesWithinModelLimit,
     patchBuilder,
     convoBuilder
   );
-  const exceedingLimitsPatchGroups = processOutsideLimitFiles(
+  
+  const exceedingLimitsPatchGroups = await processOutsideLimitFiles(
     patchesOutsideModelLimit,
     patchBuilder,
     convoBuilder
   );
+
   console.log(`${withinLimitsPatchGroups.length} within limits groups.`);
   console.log(
     `${patchesOutsideModelLimit.length} files outside limit, skipping them.`
   );
 
   const groups = [...withinLimitsPatchGroups, ...exceedingLimitsPatchGroups];
-
+  
   const feedbacks = await Promise.all(
-    groups.map((patchGroup) => {
-      return reviewFiles(patchGroup, patchBuilder, convoBuilder);
-    })
+    groups.map((patchGroup) => 
+      reviewFiles(patchGroup, patchBuilder, convoBuilder)
+    )
   );
+
   try {
     return await responseBuilder(feedbacks);
   } catch (exc) {
