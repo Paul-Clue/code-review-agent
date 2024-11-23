@@ -143,12 +143,12 @@ export const getXMLReviewPrompt = (
   ];
 };
 
-export const constructPrompt = (
+export const constructPrompt = async (
   files: PRFile[],
-  patchBuilder: (file: PRFile) => string,
+  patchBuilder: (file: PRFile) => Promise<string>,
   convoBuilder: (diff: string) => ChatCompletionMessageParam[]
-) => {
-  const patches = files.map((file) => patchBuilder(file));
+): Promise<ChatCompletionMessageParam[]> => {
+  const patches = await Promise.all(files.map((file) => patchBuilder(file)));
   const diff = patches.join("\n");
   const convo = convoBuilder(diff);
   return convo;

@@ -1,5 +1,6 @@
 import { Node } from "@babel/traverse";
 import { JavascriptParser } from "./context/language/javascript-parser";
+import { PythonParser } from "./context/language/python-parser";
 import { ChatCompletionMessageParam } from "groq-sdk/resources/chat/completions";
 
 export interface PRFile {
@@ -93,6 +94,20 @@ export interface EnclosingContext {
   enclosingContext: Node | null;
 }
 
+export interface PythonEnclosingContext {
+  type: 'ClassDeclaration' | 'FunctionDeclaration' | 'Module';
+  name: string;
+  start: number;
+  end: number;
+  loc: {
+    start: { line: number; column: number };
+    end: { line: number; column: number };
+  };
+  leadingComments: any;
+  trailingComments: any;
+  innerComments: any;
+}
+
 export interface AbstractParser {
   findEnclosingContext(
     file: string,
@@ -102,6 +117,15 @@ export interface AbstractParser {
   dryRun(file: string): { valid: boolean; error: string };
 }
 
+export interface PythonAbstractParser {
+  findEnclosingContext(
+    file: string,
+    lineStart: number,
+    lineEnd: number
+  ): Promise<PythonEnclosingContext | null>;
+  dryRun(file: string): Promise<{ valid: boolean; error: string }>;
+}
+
 const EXTENSIONS_TO_PARSERS: Map<string, AbstractParser> = new Map([
   ["ts", new JavascriptParser()],
   ["tsx", new JavascriptParser()],
@@ -109,8 +133,16 @@ const EXTENSIONS_TO_PARSERS: Map<string, AbstractParser> = new Map([
   ["jsx", new JavascriptParser()],
 ]);
 
+const PYTHON_EXTENSIONS_TO_PARSERS: Map<string, PythonAbstractParser> = new Map([
+  ["py", new PythonParser()],
+  ["pyi", new PythonParser()],
+]);
+
 export const getParserForExtension = (filename: string) => {
   const fileExtension = filename.split(".").pop().toLowerCase();
+  if (PYTHON_EXTENSIONS_TO_PARSERS.has(fileExtension)) {
+    return PYTHON_EXTENSIONS_TO_PARSERS.get(fileExtension);
+  }
   return EXTENSIONS_TO_PARSERS.get(fileExtension) || null;
 };
 

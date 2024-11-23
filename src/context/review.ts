@@ -2,11 +2,13 @@ import {
   AbstractParser,
   PRFile,
   PatchInfo,
+  PythonAbstractParser,
+  PythonEnclosingContext,
   getParserForExtension,
-} from "../constants";
-import * as diff from "diff";
-import { JavascriptParser } from "./language/javascript-parser";
-import { Node } from "@babel/traverse";
+} from '../constants';
+import * as diff from 'diff';
+import { JavascriptParser } from './language/javascript-parser';
+import { Node } from '@babel/traverse';
 
 const expandHunk = (
   contents: string,
@@ -14,7 +16,7 @@ const expandHunk = (
   linesAbove: number = 5,
   linesBelow: number = 5
 ) => {
-  const fileLines = contents.split("\n");
+  const fileLines = contents.split('\n');
   const curExpansion: string[] = [];
   const start = Math.max(0, hunk.oldStart - 1 - linesAbove);
   const end = Math.min(
@@ -38,7 +40,7 @@ const expandHunk = (
   for (let i = hunk.oldStart - 1 + hunk.oldLines; i < end; i++) {
     curExpansion.push(fileLines[i]);
   }
-  return curExpansion.join("\n");
+  return curExpansion.join('\n');
 };
 
 const expandFileLines = (
@@ -46,7 +48,7 @@ const expandFileLines = (
   linesAbove: number = 5,
   linesBelow: number = 5
 ) => {
-  const fileLines = file.old_contents.split("\n");
+  const fileLines = file.old_contents.split('\n');
   const patches: PatchInfo[] = diff.parsePatch(file.patch);
   const expandedLines: string[][] = [];
   patches.forEach((patch) => {
@@ -84,8 +86,8 @@ const expandFileLines = (
 export const expandedPatchStrategy = (file: PRFile) => {
   const expandedPatches = expandFileLines(file);
   const expansions = expandedPatches
-    .map((patchLines) => patchLines.join("\n"))
-    .join("\n\n");
+    .map((patchLines) => patchLines.join('\n'))
+    .join('\n\n');
   return `## ${file.filename}\n\n${expansions}`;
 };
 
@@ -95,12 +97,12 @@ export const rawPatchStrategy = (file: PRFile) => {
 
 const trimHunk = (hunk: diff.Hunk): diff.Hunk => {
   const startIdx = hunk.lines.findIndex(
-    (line) => line.startsWith("+") || line.startsWith("-")
+    (line) => line.startsWith('+') || line.startsWith('-')
   );
   const endIdx = hunk.lines
     .slice()
     .reverse()
-    .findIndex((line) => line.startsWith("+") || line.startsWith("-"));
+    .findIndex((line) => line.startsWith('+') || line.startsWith('-'));
   const editLines = hunk.lines.slice(startIdx, hunk.lines.length - endIdx);
   return { ...hunk, lines: editLines, newStart: startIdx + hunk.newStart };
 };
@@ -114,7 +116,7 @@ const buildingScopeString = (
   const trimmedHunk = trimHunk(hunk);
   const functionStartLine = scope.loc.start.line;
   const functionEndLine = scope.loc.end.line;
-  const updatedFileLines = currentFile.split("\n");
+  const updatedFileLines = currentFile.split('\n');
   // Extract the lines of the function
   const functionContext = updatedFileLines.slice(
     functionStartLine - 1,
@@ -125,18 +127,18 @@ const buildingScopeString = (
     hunk.newStart -
     functionStartLine +
     hunk.lines.findIndex(
-      (line) => line.startsWith("+") || line.startsWith("-")
+      (line) => line.startsWith('+') || line.startsWith('-')
     );
   // Count the number of lines that should be dropped from the function
   const dropCount = trimmedHunk.lines.filter(
-    (line) => !line.startsWith("-")
+    (line) => !line.startsWith('-')
   ).length;
 
   const hunkHeader = `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
   // Inject the changes into the function, dropping the necessary lines
   functionContext.splice(injectionIdx, dropCount, ...trimmedHunk.lines);
 
-  res.push(functionContext.join("\n"));
+  res.push(functionContext.join('\n'));
   res.unshift(hunkHeader);
   return res;
 };
@@ -149,10 +151,10 @@ const combineHunks = (
   overlappingHunks: diff.Hunk[]
 ): diff.Hunk => {
   if (!overlappingHunks || overlappingHunks.length === 0) {
-    throw "Overlapping hunks are empty, this should never happen.";
+    throw 'Overlapping hunks are empty, this should never happen.';
   }
   const sortedHunks = overlappingHunks.sort((a, b) => a.newStart - b.newStart);
-  const fileLines = file.split("\n");
+  const fileLines = file.split('\n');
   let lastHunkEnd = sortedHunks[0].newStart + sortedHunks[0].newLines;
 
   const combinedHunk: diff.Hunk = {
@@ -185,12 +187,15 @@ const combineHunks = (
   return combinedHunk;
 };
 
-const diffContextPerHunk = (file: PRFile, parser: AbstractParser) => {
+const diffContextPerHunk = async (
+  file: PRFile,
+  parser: AbstractParser | PythonAbstractParser
+) => {
   const updatedFile = diff.applyPatch(file.old_contents, file.patch);
   const patches = diff.parsePatch(file.patch);
-  if (!updatedFile || typeof updatedFile !== "string") {
-    console.log("APPLYING PATCH ERROR - FALLINGBACK");
-    throw "THIS SHOULD NOT HAPPEN!";
+  if (!updatedFile || typeof updatedFile !== 'string') {
+    console.log('APPLYING PATCH ERROR - FALLINGBACK');
+    throw 'THIS SHOULD NOT HAPPEN!';
   }
 
   const hunks: diff.Hunk[] = [];
@@ -205,38 +210,52 @@ const diffContextPerHunk = (file: PRFile, parser: AbstractParser) => {
     });
   });
 
-  hunks.forEach((hunk, idx) => {
+  for (const [idx, hunk] of hunks.entries()) {
     try {
       const trimmedHunk = trimHunk(hunk);
       const insertions = hunk.lines.filter((line) =>
-        line.startsWith("+")
+        line.startsWith('+')
       ).length;
       const lineStart = trimmedHunk.newStart;
       const lineEnd = lineStart + insertions;
-      const largestEnclosingFunction = parser.findEnclosingContext(
+
+      const context = await parser.findEnclosingContext(
         updatedFile,
         lineStart,
         lineEnd
-      ).enclosingContext;
+      );
+
+      let largestEnclosingFunction: Node | PythonEnclosingContext | null = null;
+
+      if (context) {
+        if ('enclosingContext' in context) {
+          largestEnclosingFunction = context.enclosingContext;
+        } else {
+          largestEnclosingFunction = context;
+        }
+      }
 
       if (largestEnclosingFunction) {
         const enclosingRangeKey = `${largestEnclosingFunction.loc.start.line} -> ${largestEnclosingFunction.loc.end.line}`;
         let existingHunks = scopeRangeHunkMap.get(enclosingRangeKey) || [];
         existingHunks.push(hunk);
         scopeRangeHunkMap.set(enclosingRangeKey, existingHunks);
-        scopeRangeNodeMap.set(enclosingRangeKey, largestEnclosingFunction);
+        scopeRangeNodeMap.set(
+          enclosingRangeKey,
+          largestEnclosingFunction as Node
+        );
       } else {
-        throw "No enclosing function.";
+        throw 'No enclosing function.';
       }
       order.push(idx);
     } catch (exc) {
       console.log(file.filename);
-      console.log("NORMAL STRATEGY");
+      console.log('NORMAL STRATEGY');
       console.log(exc);
       expandStrategy.push(hunk);
       order.push(idx);
     }
-  });
+  }
 
   const scopeStategy: [string, diff.Hunk][] = []; // holds map range key and combined hunk: [[key, hunk]]
   for (const [range, hunks] of scopeRangeHunkMap.entries()) {
@@ -250,7 +269,7 @@ const diffContextPerHunk = (file: PRFile, parser: AbstractParser) => {
       updatedFile,
       scopeRangeNodeMap.get(rangeKey),
       hunk
-    ).join("\n");
+    ).join('\n');
     contexts.push(context);
   });
   expandStrategy.forEach((hunk) => {
@@ -260,14 +279,14 @@ const diffContextPerHunk = (file: PRFile, parser: AbstractParser) => {
   return contexts;
 };
 
-const functionContextPatchStrategy = (
+const functionContextPatchStrategy = async (
   file: PRFile,
-  parser: AbstractParser
-): string => {
+  parser: AbstractParser | PythonAbstractParser
+): Promise<string> => {
   let res = null;
   try {
-    const contextChunks = diffContextPerHunk(file, parser);
-    res = `## ${file.filename}\n\n${contextChunks.join("\n\n")}`;
+    const contextChunks = await diffContextPerHunk(file, parser);
+    res = `## ${file.filename}\n\n${contextChunks.join('\n\n')}`;
   } catch (exc) {
     console.log(exc);
     res = expandedPatchStrategy(file);
@@ -275,10 +294,10 @@ const functionContextPatchStrategy = (
   return res;
 };
 
-export const smarterContextPatchStrategy = (file: PRFile) => {
-  const parser: AbstractParser = getParserForExtension(file.filename);
+export const smarterContextPatchStrategy = async (file: PRFile) => {
+  const parser = getParserForExtension(file.filename);
   if (parser != null) {
-    return functionContextPatchStrategy(file, parser);
+    return await functionContextPatchStrategy(file, parser);
   } else {
     return expandedPatchStrategy(file);
   }
